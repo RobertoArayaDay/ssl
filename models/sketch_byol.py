@@ -31,7 +31,7 @@ class SketchBYOL(tf.keras.Model):
         x = inputs / 127.5 - 1
         #bkbone = resnet.ResNetBackbone([2,2], [64,128])
         #This is a ResNet-34
-        bkbone = resnet.ResNetBackbone([3,4,6,3], [64,128, 256, 512])
+        bkbone = resnet.ResNetBackbone([3,4,6,3], [64,128, 256, 512], kernel_regularizer = tf.keras.regularizers.l2(self.WEIGHT_DECAY))
         #bkbone = simple.Backbone()
         x = bkbone(x)   
         # Projection head.
@@ -123,13 +123,12 @@ class SketchBYOL(tf.keras.Model):
     #                            axis=None)
     #     print('total {}'.format(total))
     #     return total / self.strategy.num_replicas_in_sync 
-      
-      
-    def fit_byol(self, data, epochs, ckp_dir):
+    
+    def fit_byol(self, data, num_training_samples, epochs, ckp_dir):
         #dist_dataset = self.strategy.experimental_distribute_dataset(data)        
         for epoch in range(epochs) :
             tf.print('{} / {}'.format(epoch, epochs))    
-            progbar = tf.keras.utils.Progbar(len(data))
+            progbar = tf.keras.utils.Progbar(num_training_samples)
             for step, batch in enumerate(data):                                     
                 loss = self.train_step_byol(batch)                    
                 #update weights            
@@ -149,4 +148,3 @@ class SketchBYOL(tf.keras.Model):
 #                self.step = self.step + 1 
                 #return {"loss": self.loss_tracker.result()}
         
-    

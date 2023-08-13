@@ -51,7 +51,7 @@ class SSearch():
             self.model= ssl_model.encoder
         if  model  == 'BYOL' :
             ssl_model = byol.SketchBYOL(self.config_data, self.config_model)
-            ssl_model.build()                    
+            ssl_model.build()                   
             ssl_model.load_weights(self.config_model.get('CKP_FILE')) 
             self.model= ssl_model.online_encoder
         assert not (self.model == None), '-- there is not a ssl model'

@@ -108,7 +108,7 @@ if __name__ == '__main__' :
     config.read('example.ini')
     config_model = config['SIMSIAM']
     config_data = config['DATA']
-    simsiam = SimSiam(config_data, config_model)        
+    simsiam = SketchSimSiam(config_data, config_model)        
     simsiam.load_weights(config_data.get('MODEL_NAME'))
     for v in simsiam.encoder.trainable_variables :
         print(v.numpy)

@@ -11,17 +11,12 @@ QuickDraw datasets, so you need the following repository
 
 import sys
 import socket
-#---------------------------------------------------------------------------
-## you can modify this part to set a local path for the dataset project
-ip = socket.gethostbyname(socket.gethostname()) 
-if ip == '192.168.20.62' :
-    sys.path.insert(0,'/home/DIINF/vchang/jsaavedr/Research/git/datasets')
-else :
-    sys.path.insert(0,'/home/jsaavedr/Research/git/datasets')
-#---------------------------------------------------------------------------
 import os
+import json
+from polyvore_outfits_loader import TripletImageLoader
+import torch
+from torchvision import transforms
 import tensorflow as tf
-import tensorflow_datasets as tfds
 import improc.augmentation as aug
 import configparser
 import models.sketch_simsiam as simsiam  
@@ -30,21 +25,19 @@ import argparse
 # import the dataset builder, here is an example for qd
 
 
-def visualize_data(ds_1, ds_2) :
+def visualize_data_polyvore(ds) :
     _, ax = plt.subplots(5, 6)    
     for _ in range(5):
-        sample_images_one = next(iter(ds_1))
-        sample_images_two = next(iter(ds_2))
-        print(sample_images_one.shape)
+        sample_images_one, sample_images_two = next(iter(ds))
         for i in range(15):        
             ax[i % 5][(i // 5)*2].imshow(sample_images_one[i].numpy().astype("int"))
-            
             ax[i % 5][((i) // 5)*2 + 1].imshow(sample_images_two[i].numpy().astype("int"))
             plt.axis("off")
         plt.waitforbuttonpress(1)
     plt.show()
-
-def do_training(ssl_model_name, config_data, config_model, ssl_ds, model_dir):
+    
+    
+def do_training(ssl_model_name, config_data, config_model, ssl_ds, model_dir, num_training_samples):
     
     lr_decayed_fn = tf.keras.optimizers.schedules.CosineDecay(initial_learning_rate=0.03, 
                                                               decay_steps = config_model.getint('STEPS'))
@@ -65,13 +58,29 @@ def do_training(ssl_model_name, config_data, config_model, ssl_ds, model_dir):
                                 epochs=config_model.getint('EPOCHS'),
                                 callbacks=[early_stopping, model_checkpoint_callback])
     if ssl_model_name == 'BYOL' :
+        print('entra al if training')
         ssl_model = byol.SketchBYOL(config_data, config_model)
         ssl_model.compile(optimizer=tf.keras.optimizers.SGD(lr_decayed_fn, momentum=0.9))
-        history = ssl_model.fit_byol(ssl_ds, 
+        history = ssl_model.fit_byol(ssl_ds, num_training_samples,
                                      epochs = config_model.getint('EPOCHS'),
                                      ckp_dir = os.path.join(model_dir, 'ckp'))
     
     return history, ssl_model
+
+
+def apply_default_augmentation(image):
+    image = tf.image.random_flip_left_right(image)
+    image = tf.image.random_flip_up_down(image)
+    image = tf.image.random_brightness(image, max_delta=0.8)
+    image = tf.image.random_contrast(image, lower=0.2, upper=1.8)
+    image = tf.image.random_hue(image, max_delta=0.2)
+    image = tf.image.random_saturation(image, lower=0.2, upper=1.8)
+    image = tf.image.random_flip_left_right(image)
+    image = tf.image.random_flip_up_down(image)
+    image = tf.image.resize(image, size=(112, 112))
+    image = (image - tf.constant([0.485, 0.456, 0.406])) / tf.constant([0.229, 0.224, 0.225])
+    return image
+
 #---------------------------------------------------------------------------------------
 def ssl_map_func(image, daug_func):
     image = image['image']    
@@ -79,8 +88,6 @@ def ssl_map_func(image, daug_func):
         
 #---------------------------------------------------------------------------------------
 VISUALIZE = False # if false, it runs training
-if ip == '127.0.1.1' :
-    VISUALIZE = True
 
 AUTO = tf.data.AUTOTUNE
 #---------------------------------------------------------------------------------------
@@ -97,6 +104,7 @@ if __name__ == '__main__':
     ssl_model_name = args.model
     assert os.path.exists(config_file), '{} does not exist'.format(config_file)        
     assert ssl_model_name in ['BYOL', 'SIMSIAM'], '{} is not a valid model'.format(ssl_model_name)
+    
     #load configuracion file
     config = configparser.ConfigParser()
     config.read(config_file)
@@ -104,45 +112,54 @@ if __name__ == '__main__':
     assert not config_model == None, '{} does not exist'.format(ssl_model_name)
     
     config_data = config['DATA']
-    ds = None
-    #
+    
+    # retrieve information for polyvore dataset
     dataset_name = config_data.get('DATASET')
-    if dataset_name == 'QD' :        
-        ds = tfds.load('tfds_qd')
-    if dataset_name == 'IMAGENET' :        
-        #data_dir ='/mnt/hd-data/Datasets/imagenet/tfds'            
-        #ds = tfds.load('imagenet1k', data_dir = data_dir)
-        ds = tfds.load('imagenet1k')
-        
-    daug = aug.DataAugmentation(config_data)    
-    #loading dataset example cifar
+    datadir = config_data.get('DATADIR')
     
-    ds_train = ds['train']
-    ssl_ds_one = ds_train
-    ssl_ds_two = ds_train     
-    #data one
-    #SEED is used to keep the same randomization in both ds_one and ds_two
-    ssl_ds_one = (
-        ssl_ds_one.shuffle(1024, seed=config_model.getint('SEED'))
-        .map(lambda x: ssl_map_func(x, daug.get_augmentation_fun()), num_parallel_calls=AUTO)
-        .batch(config_model.getint('BATCH_SIZE'))
-        .prefetch(AUTO) )
+    fn = os.path.join(datadir, 'polyvore_outfits', 'polyvore_item_metadata.json')
+    meta_data = json.load(open(fn, 'r'))
+
+    train_loader = torch.utils.data.DataLoader(
+        TripletImageLoader(datadir, 'nondisjoint', 'train', meta_data,
+                               transform=transforms.Compose([
+                               transforms.ToTensor(),
+                           ])),
+        batch_size=1, shuffle=True)
     
-    #data two
-    ssl_ds_two = (
-        ssl_ds_two.shuffle(1024, seed=config_model.getint('SEED'))
-        .map(lambda x: ssl_map_func(x, daug.get_augmentation_fun()), num_parallel_calls=AUTO)
-        .batch(config_model.getint('BATCH_SIZE'))
-        .prefetch(AUTO))
+    #sample_batch = next(iter(train_loader))
     
-    # We then zip both of these datasets to have only one
-    ssl_ds = tf.data.Dataset.zip((ssl_ds_one, ssl_ds_two))
+    #img1_shape, img2_shape, condition_shape = sample_batch[0].squeeze(0).shape, sample_batch[1].squeeze(0).shape, #sample_batch[2].shape
+
+    
+    ds = tf.data.Dataset.from_generator(
+        lambda: ((img1.squeeze(0), img2.squeeze(0), condition) for img1, img2, condition in train_loader),
+        output_signature=(
+            tf.TensorSpec((3, 300, 300), dtype=tf.float32),
+            tf.TensorSpec((3, 300, 300), dtype=tf.float32),
+            tf.TensorSpec((1,), dtype=tf.float32)
+        )
+    )
+    
+    
+    target_image_size = (112, 112)
+    ssl_ds = (
+        ds.map(lambda x, y, z: (apply_default_augmentation(tf.transpose(x, perm=[1,2,0])),
+                                apply_default_augmentation(tf.transpose(y, perm=[1,2,0])),
+                                z))
+        .shuffle(1024, seed=config_model.getint('SEED'))
+        .batch(config_model.getint('BATCH_SIZE'), drop_remainder=True)
+        .prefetch(AUTO)
+    )
+            
     
     # # Visualize a few augmented images.
-    if VISUALIZE :
+    if VISUALIZE:
+        print('if visualize')
         import matplotlib.pyplot as plt
-        visualize_data(ssl_ds_one, ssl_ds_two)
-    else :   
+        visualize_data_polyvore(ds)
+    else :
+        print('if not visualize')
         #----------------------------------------------------------------------------------
         model_dir =  config_model.get('MODEL_DIR')
         model_dir = os.path.join(model_dir, dataset_name, ssl_model_name)
@@ -151,20 +168,23 @@ if __name__ == '__main__':
             os.makedirs(os.path.join(model_dir, 'model'))
             print('--- {} was created'.format(os.path.dirname(model_dir)))
         #----------------------------------------------------------------------------------
+        print('debugging')
         tf.debugging.set_log_device_placement(True)   
         # Create a cosine decay learning scheduler.
-        num_training_samples = len(ds_train)
+        num_training_samples = 686851
         steps = config_model.getint('EPOCHS') * (num_training_samples // config_model.getint('BATCH_SIZE'))
         config_model['STEPS'] = str(steps)  
         # Compile model and start training.
+        
+        print('antes de compilar modelo')
         if gpu_id >= 0 :
             with tf.device('/device:GPU:{}'.format(gpu_id)) :
-                history, ssl_model = do_training(ssl_model_name, config_data, config_model, ssl_ds, model_dir)                
-        else :            
+                history, ssl_model = do_training(ssl_model_name, config_data, config_model, ssl_ds, model_dir, steps)                
+        else :
             gpus = tf.config.list_logical_devices('GPU')
             strategy = tf.distribute.MirroredStrategy(gpus)
             with strategy.scope() :
-                history, ssl_model = do_training(ssl_model_name, config_data, config_model, ssl_ds, model_dir)
+                history, ssl_model = do_training(ssl_model_name, config_data, config_model, ssl_ds, model_dir, steps)
                               
         #predicting                    
         #hisitory = simsiam.evaluate(ssl_ds)
